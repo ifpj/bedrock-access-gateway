@@ -1,6 +1,7 @@
 import base64
 import json
 import logging
+import os
 import re
 import time
 from abc import ABC
@@ -53,6 +54,10 @@ from api.setting import (
 
 logger = logging.getLogger(__name__)
 
+# Bearer Token authentication for Amazon Bedrock API Keys.
+# When set, this overrides the default AWS SigV4 credential chain.
+BEARER_TOKEN = os.environ.get("AWS_BEARER_TOKEN_BEDROCK", "")
+
 config = Config(
             connect_timeout=60,      # Connection timeout: 60 seconds
             read_timeout=900,        # Read timeout: 15 minutes (suitable for long streaming responses)
@@ -63,16 +68,37 @@ config = Config(
             max_pool_connections=50  # Maximum connection pool size
         )
 
+# When using Bearer Token, provide dummy credentials to satisfy boto3 client
+# initialization. The actual authentication is handled by injecting the
+# Bearer Token into the Authorization header via the before-send event hook.
+_credential_kwargs = {}
+if BEARER_TOKEN:
+    _credential_kwargs = {
+        "aws_access_key_id": "unused",
+        "aws_secret_access_key": "unused",
+    }
+
 bedrock_runtime = boto3.client(
     service_name="bedrock-runtime",
     region_name=AWS_REGION,
     config=config,
+    **_credential_kwargs,
 )
 bedrock_client = boto3.client(
     service_name="bedrock",
     region_name=AWS_REGION,
     config=config,
+    **_credential_kwargs,
 )
+
+if BEARER_TOKEN:
+    def _inject_bearer_token(request, **kwargs):
+        """Replace AWS SigV4 signature with Bearer Token in the Authorization header."""
+        request.headers['Authorization'] = f'Bearer {BEARER_TOKEN}'
+
+    bedrock_runtime.meta.events.register('before-send.bedrock-runtime.*', _inject_bearer_token)
+    bedrock_client.meta.events.register('before-send.bedrock.*', _inject_bearer_token)
+    logger.info("Bearer Token authentication enabled for Bedrock clients")
 
 SUPPORTED_BEDROCK_EMBEDDING_MODELS = {
     "cohere.embed-multilingual-v3": "Cohere Embed Multilingual",
